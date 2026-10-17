@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Procore Overtime - desktop overtime tracker (Python + Tkinter, no extra installs).
+"""Procore Overtime - Desktop Overtime Tracker
+Includes Resizable Splitter, Zoom Scaling, Collapsible Cards, and Dark/Default Mode.
 
-Your log is saved automatically to:  <your home folder>/ProcoreOvertime/overtime_data.json
-(with a backup copy next to it) after every change.
+Your log is saved automatically to: <your home folder>/ProcoreOvertime/overtime_data.json
 """
 import csv
 import json
@@ -25,14 +25,55 @@ QUEUES = ["Phones", "Chats", "Email Cases"]
 APP_DIR = Path.home() / "ProcoreOvertime"
 DATA_FILE = APP_DIR / "overtime_data.json"
 BACKUP_FILE = APP_DIR / "overtime_data.backup.json"
-DEFAULTS = {"name": "", "email": "", "rate": "", "mult": "1",
-            "entries": [], "trash": [], "timer": None}
-TEAL, CREAM, GOLD, INK, FIELD = "#0f5d54", "#f4f0e0", "#d8a73e", "#22302d", "#fbf9ef"
+DEFAULTS = {
+    "name": "",
+    "email": "",
+    "rate": "",
+    "mult": "1",
+    "entries": [],
+    "trash": [],
+    "timer": None,
+    "ui_scale": 10,
+    "theme": "default",  # "default" or "dark"
+}
+
+# Color Palettes
+THEMES = {
+    "default": {
+        "bg": "#0f5d54",         # Teal main background
+        "card_bg": "#f4f0e0",    # Cream card background
+        "accent": "#d8a73e",     # Gold accent
+        "text": "#22302d",       # Deep slate text
+        "field_bg": "#fbf9ef",   # Light entry field background
+        "field_fg": "#22302d",   # Entry text color
+        "border": "#d8a73e",     # Gold border
+        "muted": "#cbe7e2",      # Muted status text
+        "btn_gold_bg": "#d8a73e",
+        "btn_gold_fg": "#4a3406",
+        "btn_active": "#e6b84f",
+        "tree_select": "#0f5d54",
+        "tree_select_fg": "#ffffff",
+    },
+    "dark": {
+        "bg": "#0f172a",         # Deep slate/navy main background
+        "card_bg": "#1e293b",    # Slate 800 card background
+        "accent": "#38bdf8",     # Cyan/Sky blue accent
+        "text": "#f1f5f9",       # Crisp white/slate text
+        "field_bg": "#0f172a",   # Dark input background
+        "field_fg": "#f8fafc",   # Input text
+        "border": "#334155",     # Slate border
+        "muted": "#94a3b8",      # Muted text
+        "btn_gold_bg": "#f59e0b",
+        "btn_gold_fg": "#1e293b",
+        "btn_active": "#fbbf24",
+        "tree_select": "#0284c7",
+        "tree_select_fg": "#ffffff",
+    },
+}
 
 
-# ---------- pure helpers (no UI) ----------
+# ---------- Pure Helpers (No UI) ----------
 def parse_time(s):
-    """'22:46', '10.46 pm', '10:46PM' -> 'HH:MM' (24h) or None."""
     m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*([ap]m)?\s*$", s or "", re.I)
     if not m:
         return None
@@ -49,7 +90,6 @@ def parse_time(s):
 
 
 def parse_date(s):
-    """'2026-10-17' or '10/17/2026' -> ISO date string, or None."""
     s = (s or "").strip()
     for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
         try:
@@ -63,7 +103,7 @@ def entry_seconds(start, end):
     a = int(start[:2]) * 60 + int(start[3:])
     b = int(end[:2]) * 60 + int(end[3:])
     diff = (b - a) * 60
-    return diff if diff > 0 else diff + 86400  # overnight shift
+    return diff if diff > 0 else diff + 86400
 
 
 def fmt_num(v):
@@ -94,7 +134,6 @@ def money(v):
 
 
 def log_line(e, rate, mult):
-    """10/17/2026 - 2 hours - 10.46 Pm to 12.46 Am - Phones = 600"""
     h = fmt_num(e["sec"] / 3600)
     unit = "hour" if h == "1" else "hours"
     return (f"{mdy(e['date'])} - {h} {unit} - {fmt12(e['start'])} to "
@@ -105,7 +144,7 @@ def sort_key(e):
     return (e["date"], e["start"])
 
 
-# ---------- storage ----------
+# ---------- Storage ----------
 def load_data():
     for path in (DATA_FILE, BACKUP_FILE):
         try:
@@ -131,18 +170,30 @@ def save_data(data):
     tmp = DATA_FILE.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, DATA_FILE)  # atomic: never leaves a half-written file
+    os.replace(tmp, DATA_FILE)
 
 
-# ---------- app ----------
+# ---------- Main App ----------
 class App:
     def __init__(self, root):
         self.root = root
         self.data = load_data()
+        self.scale_val = self.data.get("ui_scale", 10)
+        self.current_theme = self.data.get("theme", "default")
+        if self.current_theme not in THEMES:
+            self.current_theme = "default"
+
+        self.cards = []  # Keeps track of card widgets for dynamic recoloring
+        self.labels = []
+        self.custom_frames = []
+
         root.title("Procore Overtime")
-        root.geometry("1120x720")
-        root.minsize(920, 600)
-        root.configure(bg=TEAL)
+        root.geometry("1180x760")
+        root.minsize(940, 620)
+
+        self.theme_vars = THEMES[self.current_theme]
+        root.configure(bg=self.theme_vars["bg"])
+
         self.style()
         self.status = tk.StringVar(value=f"Saved automatically to {DATA_FILE}")
         self.build()
@@ -150,33 +201,101 @@ class App:
         self.tick()
         root.protocol("WM_DELETE_WINDOW", self.close)
 
-    # -- styling
     def style(self):
+        t = THEMES[self.current_theme]
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure(".", font=("Segoe UI", 10))
-        s.configure("Card.TFrame", background=CREAM)
-        s.configure("Card.TLabel", background=CREAM, foreground=INK)
-        s.configure("Big.TLabel", background=CREAM, foreground=INK, font=("Consolas", 26, "bold"))
-        s.configure("Pay.TLabel", background=CREAM, foreground=TEAL, font=("Segoe UI", 14, "bold"))
-        s.configure("Card.TLabelframe", background=CREAM, bordercolor=GOLD, relief="solid", borderwidth=1)
-        s.configure("Card.TLabelframe.Label", background=CREAM, foreground=INK, font=("Segoe UI", 11, "bold"))
-        s.configure("Gold.TButton", background=GOLD, foreground="#4a3406", font=("Segoe UI", 10, "bold"))
-        s.map("Gold.TButton", background=[("active", "#e6b84f")])
-        s.configure("Stop.TButton", background="#b5473a", foreground="white", font=("Segoe UI", 10, "bold"))
-        s.map("Stop.TButton", background=[("active", "#d9534f")])
-        s.configure("Treeview", rowheight=28, fieldbackground=FIELD, background=FIELD, foreground=INK)
-        s.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-        s.map("Treeview", background=[("selected", TEAL)], foreground=[("selected", "white")])
-        s.configure("TEntry", fieldbackground=FIELD)
-        s.configure("TCombobox", fieldbackground=FIELD)
-        s.configure("Panedwindow", background=TEAL)
+        base_f = max(8, self.scale_val)
 
-    def card(self, parent, title):
-        lf = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe", padding=12)
-        lf.pack(fill="x", expand=True, pady=(0, 10))
-        lf.columnconfigure(1, weight=1)
-        return lf
+        s.configure(".", font=("Segoe UI", base_f))
+        s.configure("Card.TFrame", background=t["card_bg"])
+        s.configure("Card.TLabel", background=t["card_bg"], foreground=t["text"], font=("Segoe UI", base_f))
+        s.configure("Big.TLabel", background=t["card_bg"], foreground=t["text"], font=("Consolas", int(base_f * 2.4), "bold"))
+        s.configure("Pay.TLabel", background=t["card_bg"], foreground=t["accent"], font=("Segoe UI", int(base_f * 1.3), "bold"))
+        s.configure("Card.TLabelframe", background=t["card_bg"], bordercolor=t["border"], relief="solid", borderwidth=1)
+        s.configure("Card.TLabelframe.Label", background=t["card_bg"], foreground=t["text"], font=("Segoe UI", int(base_f * 1.1), "bold"))
+
+        s.configure("Gold.TButton", background=t["btn_gold_bg"], foreground=t["btn_gold_fg"], font=("Segoe UI", base_f, "bold"))
+        s.map("Gold.TButton", background=[("active", t["btn_active"])])
+
+        s.configure("Stop.TButton", background="#b5473a", foreground="white", font=("Segoe UI", base_f, "bold"))
+        s.map("Stop.TButton", background=[("active", "#d9534f")])
+
+        s.configure("Treeview", rowheight=int(base_f * 2.6), fieldbackground=t["field_bg"], background=t["field_bg"],
+                    foreground=t["field_fg"], font=("Segoe UI", base_f))
+        s.configure("Treeview.Heading", background=t["card_bg"], foreground=t["text"], font=("Segoe UI", int(base_f * 1.05), "bold"))
+        s.map("Treeview", background=[("selected", t["tree_select"])], foreground=[("selected", t["tree_select_fg"])])
+
+        s.configure("TEntry", fieldbackground=t["field_bg"], foreground=t["field_fg"], font=("Segoe UI", base_f))
+        s.configure("TCombobox", fieldbackground=t["field_bg"], foreground=t["field_fg"], font=("Segoe UI", base_f))
+        s.configure("Panedwindow", background=t["bg"])
+
+    def toggle_theme(self):
+        self.current_theme = "dark" if self.current_theme == "default" else "default"
+        self.data["theme"] = self.current_theme
+        self.persist()
+        self.apply_theme()
+
+    def apply_theme(self):
+        t = THEMES[self.current_theme]
+        self.theme_vars = t
+        self.root.configure(bg=t["bg"])
+        self.style()
+
+        # Update Native Widgets (Frames, Canvases, Labels)
+        for f in self.custom_frames:
+            f.configure(bg=t["bg"])
+        self.canvas.configure(bg=t["bg"])
+        self.left_inner.configure(bg=t["bg"])
+        self.theme_btn.config(text="☀️ Default Mode" if self.current_theme == "dark" else "🌙 Dark Mode")
+        self.zoom_lbl.config(bg=t["bg"], fg=t["muted"])
+        self.status_lbl.config(bg=t["bg"], fg=t["muted"])
+
+        for header, lbl, btn in self.cards:
+            header.configure(bg=t["card_bg"])
+            lbl.configure(bg=t["card_bg"], fg=t["text"])
+            btn.configure(bg=t["card_bg"], fg=t["muted"])
+
+        self.refresh()
+
+    def change_scale(self, delta):
+        new_val = max(8, min(18, self.scale_val + delta))
+        if new_val != self.scale_val:
+            self.scale_val = new_val
+            self.data["ui_scale"] = new_val
+            self.persist()
+            self.style()
+            self.refresh()
+
+    def make_collapsible_card(self, parent, title):
+        t = THEMES[self.current_theme]
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=int(self.scale_val * 0.8))
+        frame.pack(fill="x", expand=True, pady=(0, 10))
+
+        header = tk.Frame(frame, bg=t["card_bg"])
+        header.pack(fill="x", pady=(0, 6))
+
+        lbl = tk.Label(header, text=title, bg=t["card_bg"], fg=t["text"], font=("Segoe UI", int(self.scale_val * 1.1), "bold"))
+        lbl.pack(side="left")
+
+        content = ttk.Frame(frame, style="Card.TFrame")
+        content.pack(fill="both", expand=True)
+        content.columnconfigure(1, weight=1)
+
+        def toggle():
+            if content.winfo_viewable():
+                content.pack_forget()
+                btn.config(text="[ + ]")
+            else:
+                content.pack(fill="both", expand=True)
+                btn.config(text="[ − ]")
+
+        btn = tk.Button(header, text="[ − ]", command=toggle, bg=t["card_bg"], fg=t["muted"], bd=0, cursor="hand2",
+                        font=("Segoe UI", int(self.scale_val * 0.9), "bold"))
+        btn.pack(side="right")
+
+        self.cards.append((header, lbl, btn))
+        return content
 
     def field(self, parent, label, row, var=None):
         ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=3)
@@ -184,39 +303,59 @@ class App:
         e.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
         return e
 
-    # -- layout
     def build(self):
-        # Interactive Resizable Splitter
-        paned = ttk.PanedWindow(self.root, orient="horizontal")
-        paned.pack(fill="both", expand=True, padx=10, pady=10)
+        t = THEMES[self.current_theme]
 
-        # Left Panel (Cards) with Scroll Support
-        left_container = tk.Frame(paned, bg=TEAL)
-        paned.add(left_container, weight=1)
+        # Horizontal Resizable Splitter
+        self.paned = ttk.PanedWindow(self.root, orient="horizontal")
+        self.paned.pack(fill="both", expand=True, padx=10, pady=10)
 
-        canvas = tk.Canvas(left_container, bg=TEAL, highlightthickness=0)
-        v_scroll = ttk.Scrollbar(left_container, orient="vertical", command=canvas.yview)
-        left = tk.Frame(canvas, bg=TEAL)
+        # Left Panel Container with Scrolling
+        self.left_container = tk.Frame(self.paned, bg=t["bg"])
+        self.paned.add(self.left_container, weight=1)
+        self.custom_frames.append(self.left_container)
 
-        left.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas_window = canvas.create_window((0, 0), window=left, anchor="nw")
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
-        canvas.configure(yscrollcommand=v_scroll.set)
+        # Top Control Bar (Zoom & Theme Switcher)
+        top_bar = tk.Frame(self.left_container, bg=t["bg"])
+        top_bar.pack(fill="x", pady=(0, 6))
+        self.custom_frames.append(top_bar)
 
-        # Mousewheel scroll binding for left panel
+        self.zoom_lbl = tk.Label(top_bar, text="Zoom:", bg=t["bg"], fg=t["muted"], font=("Segoe UI", 9))
+        self.zoom_lbl.pack(side="left")
+        ttk.Button(top_bar, text="A−", width=3, command=lambda: self.change_scale(-1)).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="A+", width=3, command=lambda: self.change_scale(1)).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="Reset", width=5, command=lambda: self.change_scale(10 - self.scale_val)).pack(side="left", padx=2)
+
+        # Dark Mode / Default Mode Toggle Button
+        theme_title = "☀️ Default Mode" if self.current_theme == "dark" else "🌙 Dark Mode"
+        self.theme_btn = ttk.Button(top_bar, text=theme_title, command=self.toggle_theme)
+        self.theme_btn.pack(side="right")
+
+        # Scrollable Left Canvas
+        self.canvas = tk.Canvas(self.left_container, bg=t["bg"], highlightthickness=0)
+        v_scroll = ttk.Scrollbar(self.left_container, orient="vertical", command=self.canvas.yview)
+        self.left_inner = tk.Frame(self.canvas, bg=t["bg"])
+        self.custom_frames.append(self.left_inner)
+
+        self.left_inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        canvas_window = self.canvas.create_window((0, 0), window=self.left_inner, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(canvas_window, width=e.width))
+        self.canvas.configure(yscrollcommand=v_scroll.set)
+
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", lambda e: _on_mousewheel(e) if str(e.widget).startswith(str(left_container)) else None)
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.canvas.bind_all("<MouseWheel>", lambda e: _on_mousewheel(e) if str(e.widget).startswith(str(self.left_container)) else None)
 
-        canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.pack(side="left", fill="both", expand=True)
         v_scroll.pack(side="right", fill="y")
 
-        # Right Panel (Log Table & Controls)
-        right = tk.Frame(paned, bg=TEAL)
-        paned.add(right, weight=3)
+        # Right Panel Container (Log Table & Actions)
+        self.right = tk.Frame(self.paned, bg=t["bg"])
+        self.paned.add(self.right, weight=3)
+        self.custom_frames.append(self.right)
 
         # 1. Pay Settings Card
-        c = self.card(left, "Pay settings")
+        c = self.make_collapsible_card(self.left_inner, "Pay settings")
         self.v_name = tk.StringVar(value=self.data["name"])
         self.v_email = tk.StringVar(value=self.data["email"])
         self.v_rate = tk.StringVar(value=str(self.data["rate"]))
@@ -229,7 +368,7 @@ class App:
             v.trace_add("write", lambda *a: self.on_settings())
 
         # 2. Live Timer Card
-        c = self.card(left, "Live timer")
+        c = self.make_collapsible_card(self.left_inner, "Live timer")
         self.clock = ttk.Label(c, text="00:00:00", style="Big.TLabel", anchor="center")
         self.clock.pack(fill="x", pady=(2, 6))
         row = ttk.Frame(c, style="Card.TFrame")
@@ -241,7 +380,7 @@ class App:
         self.t_btn.pack(side="right")
 
         # 3. Add Overtime Manually Card
-        c = self.card(left, "Add overtime manually")
+        c = self.make_collapsible_card(self.left_inner, "Add overtime manually")
         self.m_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.m_start, self.m_end, self.m_note = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.field(c, "Date (YYYY-MM-DD)", 0, self.m_date)
@@ -256,7 +395,7 @@ class App:
             row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
 
         # 4. Summary Card
-        c = self.card(left, "Summary")
+        c = self.make_collapsible_card(self.left_inner, "Summary")
         self.s_time = ttk.Label(c, text="", style="Card.TLabel")
         self.s_time.pack(anchor="w")
         self.s_pay = ttk.Label(c, text="", style="Pay.TLabel")
@@ -264,14 +403,14 @@ class App:
         self.s_q = ttk.Label(c, text="", style="Card.TLabel", justify="left")
         self.s_q.pack(anchor="w")
 
-        # Right Side - Overtime Log
-        box = ttk.LabelFrame(right, text="Overtime log", style="Card.TLabelframe", padding=10)
+        # Right Side - Overtime Log Table
+        box = ttk.LabelFrame(self.right, text="Overtime log", style="Card.TLabelframe", padding=10)
         box.pack(fill="both", expand=True)
         cols = ("date", "queue", "time", "dur", "pay", "note")
         self.tree = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse")
-        for k, t, w in (("date", "Date", 90), ("queue", "Queue", 100), ("time", "Time", 170),
-                        ("dur", "Duration", 85), ("pay", "Pay", 115), ("note", "Note", 200)):
-            self.tree.heading(k, text=t)
+        for k, t_title, w in (("date", "Date", 90), ("queue", "Queue", 100), ("time", "Time", 170),
+                              ("dur", "Duration", 85), ("pay", "Pay", 115), ("note", "Note", 200)):
+            self.tree.heading(k, text=t_title)
             self.tree.column(k, width=w, stretch=(k == "note"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -281,8 +420,10 @@ class App:
         self.tree.bind("<Delete>", lambda e: self.delete_selected())
 
         # Action Buttons Toolbar
-        bar = tk.Frame(right, bg=TEAL)
+        bar = tk.Frame(self.right, bg=t["bg"])
         bar.pack(fill="x", pady=(10, 0))
+        self.custom_frames.append(bar)
+
         for text, cmd, st in (("📋 Copy log", self.copy_log, "Gold.TButton"),
                               ("✏️ Edit", self.edit_selected, "TButton"),
                               ("🗑️ Delete", self.delete_selected, "TButton"),
@@ -292,9 +433,10 @@ class App:
                               ("📁 Data folder", self.open_folder, "TButton")):
             ttk.Button(bar, text=text, command=cmd, style=st).pack(side="left", padx=(0, 6))
 
-        tk.Label(right, textvariable=self.status, bg=TEAL, fg="#bfe3dd", anchor="w").pack(fill="x", pady=(8, 0))
+        self.status_lbl = tk.Label(self.right, textvariable=self.status, bg=t["bg"], fg=t["muted"], anchor="w")
+        self.status_lbl.pack(fill="x", pady=(8, 0))
 
-    # -- data / state
+    # -- State Management --
     def rate(self):
         try:
             return float(self.v_rate.get())
@@ -350,7 +492,7 @@ class App:
             return None
         return next((e for e in self.data["entries"] if e["id"] == sel[0]), None)
 
-    # -- timer
+    # -- Timer --
     def tick(self):
         t = self.data.get("timer")
         if t:
@@ -386,7 +528,7 @@ class App:
         self.sync_timer_ui()
         self.refresh()
 
-    # -- add / edit / delete / restore
+    # -- Manual Entry & Actions --
     def validate(self, d, s, e):
         d2, s2, e2 = parse_date(d), parse_time(s), parse_time(e)
         if not (d2 and s2 and e2):
@@ -414,9 +556,10 @@ class App:
         e = self.selected()
         if not e:
             return
+        t = THEMES[self.current_theme]
         win = tk.Toplevel(self.root)
         win.title("Edit entry")
-        win.configure(bg=CREAM)
+        win.configure(bg=t["card_bg"])
         win.transient(self.root)
         win.grab_set()
         f = ttk.Frame(win, style="Card.TFrame", padding=14)
@@ -457,17 +600,18 @@ class App:
         self.data["trash"].insert(0, e)
         self.persist()
         self.refresh()
-        self.say("Moved to Recently deleted. You can restore it from there.")
+        self.say("Moved to Recently deleted.")
 
     def show_trash(self):
+        t = THEMES[self.current_theme]
         win = tk.Toplevel(self.root)
         win.title("Recently deleted")
-        win.configure(bg=CREAM)
+        win.configure(bg=t["card_bg"])
         win.geometry("620x360")
         win.transient(self.root)
         tree = ttk.Treeview(win, columns=("d", "q", "t", "p"), show="headings", selectmode="browse")
-        for k, t, w in (("d", "Date", 90), ("q", "Queue", 90), ("t", "Time", 190), ("p", "Pay", 110)):
-            tree.heading(k, text=t)
+        for k, t_heading, w in (("d", "Date", 90), ("q", "Queue", 90), ("t", "Time", 190), ("p", "Pay", 110)):
+            tree.heading(k, text=t_heading)
             tree.column(k, width=w)
         tree.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -501,7 +645,7 @@ class App:
                 self.persist()
                 fill()
 
-        bar = tk.Frame(win, bg=CREAM)
+        bar = tk.Frame(win, bg=t["card_bg"])
         bar.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bar, text="Restore", style="Gold.TButton", command=lambda: restore(pick())).pack(side="left")
         ttk.Button(bar, text="Restore all", command=lambda: restore(all_=True)).pack(side="left", padx=6)
@@ -509,7 +653,6 @@ class App:
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         fill()
 
-    # -- output
     def log_text(self):
         r, m = self.rate(), self.mult()
         return "\n".join(log_line(e, r, m) for e in self.entries_sorted(newest_first=False))
@@ -570,12 +713,12 @@ class App:
         self.copy_log()
         subject = quote(f"Procore Overtime log {datetime.now():%Y-%m-%d}")
         webbrowser.open(f"mailto:{to}?subject={subject}&body={quote(body)}")
-        self.say("Opening your email app (the full log text is also on your clipboard).")
+        self.say("Opening email app.")
 
     def open_folder(self):
         APP_DIR.mkdir(parents=True, exist_ok=True)
         if sys.platform.startswith("win"):
-            os.startfile(APP_DIR)  # noqa
+            os.startfile(APP_DIR)
         elif sys.platform == "darwin":
             subprocess.Popen(["open", str(APP_DIR)])
         else:
@@ -589,7 +732,7 @@ class App:
 def main():
     try:
         import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on Windows
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
     root = tk.Tk()
