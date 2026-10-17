@@ -8,7 +8,9 @@ What's inside
   * "Clear all" (restorable from Recently deleted), CSV export and copy log
   * A separate Overtime summary page (totals, by queue, by day and by month)
   * Resizable cards: drag the divider on their right edge to make them wider or
-    narrower, and drag a card's bottom edge to make it taller (double-click to reset)
+    narrower, and drag a card's bottom edge to make it taller or shorter. The text,
+    boxes and clock inside grow and shrink with the card (double-click to reset)
+  * Move cards into any order: drag a card by its ⠿ handle or title, or use ▲ / ▼
   * Zoom, collapsible cards, and Default, Dark or Custom themes
   * You choose the folder where your log is saved (View > Change save folder...)
 
@@ -27,6 +29,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -34,6 +37,7 @@ from tkinter import font as tkfont
 
 APP_NAME = "Procore OT App"
 QUEUES = ["Phones", "Chats", "Email Cases"]
+CARD_KEYS = ("pay", "timer", "manual")
 DATA_NAME = "overtime_data.json"
 BACKUP_NAME = "overtime_data.backup.json"
 SETTINGS_NAME = "ProcoreOTApp.settings.json"
@@ -80,7 +84,7 @@ DEFAULTS = {
     "name": "", "rate": "", "mult": "1",
     "entries": [], "trash": [], "timer": None,
     "ui_scale": 10, "theme": "default", "custom_theme": dict(CUSTOM_DEFAULT),
-    "collapsed": {}, "side_width": None, "card_extra": {}, "geometry": "", "maximized": False, "page": "log",
+    "collapsed": {}, "side_width": None, "card_extra": {}, "card_order": list(CARD_KEYS), "geometry": "", "maximized": False, "page": "log",
 }
 
 
@@ -310,7 +314,11 @@ def normalize(d):
     if not isinstance(out.get("collapsed"), dict):
         out["collapsed"] = {}
     extra = out.get("card_extra")
-    out["card_extra"] = {str(k): clamp_int(v, 0, 2000, 0) for k, v in extra.items()} if isinstance(extra, dict) else {}
+    out["card_extra"] = ({str(k): clamp_int(v, -1500, 3000, 0) for k, v in extra.items()}
+                         if isinstance(extra, dict) else {})
+    order = out.get("card_order")
+    order = [k for k in order if k in CARD_KEYS] if isinstance(order, list) else []
+    out["card_order"] = list(dict.fromkeys(order)) + [k for k in CARD_KEYS if k not in order]
     sw = out.get("side_width")
     if not isinstance(sw, int) and isinstance(out.get("sash"), int):
         sw = out["sash"]  # width saved by the previous version's splitter
@@ -604,10 +612,14 @@ class App:
         self.body = None
         self.side = None
         self.clock = None
-        self.timer_spacer = None
-        self.timer_extra = 0
+        self.cards = {}
+        self.card_order = list(self.data["card_order"])
+        self._fit_pending = set()
+        self._fit_job = None
+        self._canvas_w = 0
         self._hdrag = None
         self._vdrag = None
+        self._cdrag = None
         self.side_canvas = None
         self.status = tk.StringVar(value="Ready.")
 
@@ -690,6 +702,7 @@ class App:
         button("Icon.TButton", p["soft"], p["text"], p["soft_hover"], border=p["border"],
                padding=(round(self.scale * 0.5), round(self.scale * 0.3)))
         button("Ghost.TButton", p["card_bg"], p["muted"], p["soft"], padding=(4, 0), font=self.f(1.2, "bold"))
+        button("GhostSmall.TButton", p["card_bg"], p["muted"], p["soft"], padding=(3, 0), font=self.f(0.85, "bold"))
         button("Nav.TButton", p["header_bg"], p["header_muted"], p["nav_bg"])
         button("NavActive.TButton", p["accent"], p["accent_fg"], p["accent_hover"])
         button("Bar.TButton", p["nav_bg"], p["header_fg"], p["nav_hover"],
@@ -749,7 +762,16 @@ class App:
             w.destroy()
         self.side_canvas = None
         self.clock = None
-        self.timer_spacer = None
+        self.cards = {}
+        self.card_order = list(self.data["card_order"])
+        if self._fit_job is not None:
+            try:
+                self.root.after_cancel(self._fit_job)
+            except tk.TclError:
+                pass
+        self._fit_job = None
+        self._fit_pending = set()
+        self._canvas_w = 0
         self._toolbar_mode = None
         self.compute_palette()
         self.root.configure(bg=self.p["bg"])
@@ -759,6 +781,7 @@ class App:
         self.refresh()
         self.sync_timer_ui()
         self.root.after(150, self.apply_side_width)
+        self.root.after(250, self.schedule_fit)
 
     def build(self):
         self.build_header()
@@ -813,7 +836,6 @@ class App:
             return 0
         if store:
             self.data["side_width"] = width
-        self.fit_clock(width)
         return width
 
     def apply_side_width(self):
@@ -867,42 +889,91 @@ class App:
             w.bind("<Double-Button-1>", reset)
         return grip
 
-    def fit_clock(self, side_width=None):
-        """Make the timer bigger as its card gets taller (as far as the card width allows)."""
-        if self.clock is None:
-            return
-        base = max(7, round(self.scale * 3.0))
-        extra = self.timer_extra
-        if side_width is None:
+    def schedule_fit(self, keys=None):
+        """Re-fit card contents soon (several requests are merged into one)."""
+        self._fit_pending.update(CARD_KEYS if keys is None else keys)
+        if self._fit_job is None:
+            self._fit_job = self.root.after(1, self.run_fit)
+
+    def run_fit(self):
+        if self._fit_job is not None:
             try:
-                side_width = int(self.side.cget("width"))
-            except (tk.TclError, ValueError, AttributeError):
-                side_width = self.default_side_width()
-        avail = side_width - int(self.scale * 9)
+                self.root.after_cancel(self._fit_job)
+            except tk.TclError:
+                pass
+        self._fit_job = None
+        keys, self._fit_pending = self._fit_pending, set()
+        for k in CARD_KEYS:
+            if k in keys and k in self.cards:
+                self.fit_card(self.cards[k])
 
-        cache = self.__dict__.setdefault("_clock_metrics", {})
+    def _set_card_font(self, c, size):
+        base = self.scale
+        k = size / base
+        c.fonts["n"].configure(size=size)
+        c.fonts["b"].configure(size=size)
+        c.fonts["m"].configure(size=max(7, round(base * 0.9 * k)))
+        if "c" in c.fonts:
+            c.fonts["c"].configure(size=max(7, round(base * 3.0 * k)))
+        c.size = size
 
-        def m(size):  # (text width, line height) of the clock at this font size
-            if size not in cache:
-                fnt = tkfont.Font(root=self.root, family="Consolas", size=size, weight="bold")
-                cache[size] = (fnt.measure("00:00:00"), fnt.metrics("linespace"))
-            return cache[size]
+    def _measure(self, c):
+        """Space the card's contents need right now: (width, height) in pixels."""
+        c.content.update_idletasks()
+        return c.content.winfo_reqwidth(), c.content.winfo_reqheight()
 
+    def _card_space(self, c):
         try:
-            base_h = m(base)[1]
-            size = base
-            while size < 400:
-                w, h = m(size + 2)
-                if w > avail or h - base_h > extra:
-                    break
-                size += 2
-            used = m(size)[1] - base_h
+            w = c.content.winfo_width()
         except tk.TclError:
-            size, used = base, 0
+            w = 0
+        if w <= 1:  # not drawn yet: estimate from the card column's width
+            try:
+                w = int(self.side.cget("width")) - 60
+            except (tk.TclError, ValueError, AttributeError):
+                w = self.default_side_width() - 60
+        return max(60, w)
+
+    def fit_card(self, c):
+        """Grow or shrink everything inside a card (text, boxes, clock) to fill its size."""
         try:
-            self.clock.configure(font=("Consolas", size, "bold"))
-            if self.timer_spacer is not None:
-                self.timer_spacer.configure(height=max(1, extra - used))
+            if c.collapsed or not c.content.winfo_exists():
+                return
+            for r in c.stretch_rows:
+                c.content.rowconfigure(r, pad=0)
+            avail = self._card_space(c)
+            for lbl in c.wrap:
+                lbl.configure(wraplength=max(80, avail))
+            base = self.scale
+            self._set_card_font(c, base)
+            h0 = self._measure(c)[1]
+
+            def fits(size):
+                self._set_card_font(c, size)
+                w, h = self._measure(c)
+                return w <= avail and h - h0 <= c.extra
+
+            lo, hi, best = 7, max(base, min(72, base * 4)), 7
+            if fits(base):
+                best, lo = base, base + 1
+            else:
+                hi = base - 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if fits(mid):
+                    best, lo = mid, mid + 1
+                else:
+                    hi = mid - 1
+            self._set_card_font(c, best)
+            used = self._measure(c)[1] - h0
+            c.min_extra = used if best == 7 else None
+            if c.min_extra is not None and c.extra < c.min_extra:
+                c.extra = c.min_extra  # it can't get any smaller
+            left = min(c.extra - used, max(0, c.extra))  # don't pad past what you dragged
+            if left > 0 and c.stretch_rows:
+                per, rem = divmod(int(left), len(c.stretch_rows))
+                for i, r in enumerate(c.stretch_rows):
+                    c.content.rowconfigure(r, pad=per + (1 if i < rem else 0))
         except tk.TclError:
             pass
 
@@ -912,6 +983,58 @@ class App:
         self.persist()
         self.rebuild()
         self.say("Card sizes reset.")
+
+    def reset_card_order(self):
+        self.card_order = list(CARD_KEYS)
+        self.data["card_order"] = list(CARD_KEYS)
+        self.pack_cards()
+        self.persist()
+        self.say("Card order reset.")
+
+    # ----- moving cards -----
+    def pack_cards(self):
+        cards = [self.cards[k] for k in self.card_order if k in self.cards]
+        for c in cards:
+            c.outer.pack_forget()
+        for c in cards:
+            c.outer.pack(fill="x", pady=(0, 12))
+
+    def move_card(self, key, step):
+        order = self.card_order
+        i = order.index(key)
+        j = max(0, min(len(order) - 1, i + step))
+        if i == j:
+            self.say("That card is already at the " + ("top." if step < 0 else "bottom."))
+            return
+        order[i], order[j] = order[j], order[i]
+        self.data["card_order"] = list(order)
+        self.pack_cards()
+        self.persist()
+        self.say("Card moved. Drag a card by its ⠿ handle to move it anywhere.")
+
+    def _drag_card_to(self, key, y_root):
+        others = [k for k in self.card_order if k != key]
+        idx = 0
+        for k in others:
+            o = self.cards[k].outer
+            try:
+                if o.winfo_rooty() + o.winfo_height() / 2 < y_root:
+                    idx += 1
+            except tk.TclError:
+                pass
+        new = others[:idx] + [key] + others[idx:]
+        if new != self.card_order:
+            self.card_order = new
+            self.pack_cards()
+        cv = self.side_canvas
+        try:
+            top = cv.winfo_rooty()
+            if y_root < top + 30:
+                cv.yview_scroll(-1, "units")
+            elif y_root > top + cv.winfo_height() - 30:
+                cv.yview_scroll(1, "units")
+        except (tk.TclError, AttributeError):
+            pass
 
     def build_header(self):
         p = self.p
@@ -965,6 +1088,7 @@ class App:
         m.add_command(label="Zoom out", accelerator="Ctrl -", command=lambda: self.change_scale(-1))
         m.add_command(label="Reset zoom", accelerator="Ctrl 0", command=lambda: self.change_scale(10 - self.scale))
         m.add_command(label="Reset card sizes", command=self.reset_card_sizes)
+        m.add_command(label="Reset card order", command=self.reset_card_order)
         m.add_separator()
         m.add_command(label="Change save folder...", command=self.change_folder)
         m.add_command(label="Open save folder", command=self.open_folder)
@@ -1002,14 +1126,20 @@ class App:
         inner = tk.Frame(canvas, bg=p["bg"])
         win = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        def on_canvas(e):
+            canvas.itemconfigure(win, width=e.width)
+            if e.width != self._canvas_w:
+                self._canvas_w = e.width
+                self.schedule_fit()
+
+        canvas.bind("<Configure>", on_canvas)
         canvas.configure(yscrollcommand=vs.set)
         canvas.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y", padx=(4, 0))
         self.side_canvas = canvas
         self.root.bind_all("<MouseWheel>", self._on_wheel)
         self.build_cards(inner)
-        self.fit_clock()
+        self.schedule_fit()
         return outer
 
     def _on_wheel(self, event):
@@ -1025,64 +1155,93 @@ class App:
             c.yview_scroll(step * max(1, abs(int(event.delta / 120))), "units")
 
     def card(self, parent, key, title, icon=""):
-        p = self.p
+        """A sidebar card you can resize (bottom edge), move (⠿ handle or ▲▼) and collapse (▾)."""
+        p, base = self.p, self.scale
+        c = SimpleNamespace(key=key, extra=clamp_int(self.data["card_extra"].get(key), -1500, 3000, 0),
+                            min_extra=None, stretch_rows=[], wrap=[], size=base,
+                            collapsed=bool(self.data["collapsed"].get(key)))
+        # Each card has its own fonts so its text can grow and shrink with the card.
+        c.fonts = {"n": tkfont.Font(root=self.root, family="Segoe UI", size=base),
+                   "b": tkfont.Font(root=self.root, family="Segoe UI", size=base, weight="bold"),
+                   "m": tkfont.Font(root=self.root, family="Segoe UI", size=max(7, round(base * 0.9)))}
+        if key == "timer":
+            c.fonts["c"] = tkfont.Font(root=self.root, family="Consolas", size=max(7, round(base * 3.0)),
+                                       weight="bold")
+        c.st = {name: f"{key}.{parent_style}" for name, parent_style in (
+            ("label", "Card.TLabel"), ("muted", "Muted.TLabel"), ("clock", "Clock.TLabel"),
+            ("primary", "Primary.TButton"), ("danger", "Danger.TButton"), ("icon", "Icon.TButton"))}
+        st = ttk.Style(self.root)
+        for name, fkey in (("label", "n"), ("muted", "m"), ("primary", "b"), ("danger", "b"), ("icon", "b")):
+            st.configure(c.st[name], font=c.fonts[fkey])
+        if "c" in c.fonts:
+            st.configure(c.st["clock"], font=c.fonts["c"])
+
         outer = tk.Frame(parent, bg=p["card_bg"], highlightthickness=1, highlightbackground=p["border"],
                          highlightcolor=p["border"])
-        outer.pack(fill="x", pady=(0, 12))
+        c.outer = outer
         tk.Frame(outer, bg=p["accent"], width=4).pack(side="left", fill="y")
         vcur = "sb_v_double_arrow"
         grip = tk.Frame(outer, bg=p["card_bg"], height=12, cursor=vcur)
         grip.pack(side="bottom", fill="x")
-        handle = tk.Frame(grip, bg=p["border"], height=3, width=int(self.scale * 5), cursor=vcur)
+        handle = tk.Frame(grip, bg=p["border"], height=3, width=int(base * 5), cursor=vcur)
         handle.place(relx=0.5, rely=0.5, anchor="center")
+        c.grip = grip
         body = tk.Frame(outer, bg=p["card_bg"])
         body.pack(side="left", fill="both", expand=True, padx=14, pady=(12, 0))
         head = tk.Frame(body, bg=p["card_bg"])
         head.pack(fill="x")
-        tk.Label(head, text=f"{icon}  {title}" if icon else title, bg=p["card_bg"], fg=p["text"],
-                 font=self.f(1.15, "bold")).pack(side="left")
+        mcur = "fleur"
+        mover = tk.Label(head, text="⠿", bg=p["card_bg"], fg=p["muted"], font=self.f(1.15, "bold"), cursor=mcur)
+        mover.pack(side="left", padx=(0, 6))
+        title_lbl = tk.Label(head, text=f"{icon}  {title}" if icon else title, bg=p["card_bg"], fg=p["text"],
+                             font=self.f(1.15, "bold"), cursor=mcur)
+        title_lbl.pack(side="left")
         content = ttk.Frame(body, style="Card.TFrame")
         content.columnconfigure(1, weight=1)
-        spacer = tk.Frame(body, bg=p["card_bg"], height=1)
-        extra = [clamp_int(self.data["card_extra"].get(key), 0, 2000, 0)]
-        if key == "timer":
-            self.timer_spacer, self.timer_extra = spacer, extra[0]
-        else:
-            spacer.configure(height=max(1, extra[0]))
+        c.content = content
 
-        def apply_extra():
-            if key == "timer":
-                self.timer_extra = extra[0]
-                self.fit_clock()
-            else:
-                spacer.configure(height=max(1, extra[0]))
+        btn = ttk.Button(head, text="▸" if c.collapsed else "▾", width=2, style="Ghost.TButton", cursor="hand2")
+        btn.pack(side="right")
+        ttk.Button(head, text="▼", width=2, style="GhostSmall.TButton", cursor="hand2",
+                   command=lambda: self.move_card(key, 1)).pack(side="right")
+        ttk.Button(head, text="▲", width=2, style="GhostSmall.TButton", cursor="hand2",
+                   command=lambda: self.move_card(key, -1)).pack(side="right")
 
+        # -- resize: drag the bottom edge --
         def paint(on):
             handle.configure(bg=p["accent"] if on else p["border"])
 
         def press(e):
-            self._vdrag = (e.y_root, extra[0])
+            self._vdrag = (e.y_root, c.extra)
             paint(True)
 
         def motion(e):
             if self._vdrag:
                 y0, h0 = self._vdrag
-                extra[0] = max(0, min(2000, h0 + e.y_root - y0))
-                apply_extra()
+                new = max(-1500, min(3000, h0 + e.y_root - y0))
+                if c.min_extra is not None:
+                    new = max(c.min_extra, new)
+                if new != c.extra:
+                    c.extra = new
+                    self.schedule_fit([key])
 
         def release(e):
             if self._vdrag:
                 self._vdrag = None
                 paint(False)
-                self.data["card_extra"][key] = extra[0]
+                self.run_fit()
+                if c.extra:
+                    self.data["card_extra"][key] = int(c.extra)
+                else:
+                    self.data["card_extra"].pop(key, None)
                 self.persist()
                 self.say("Card size saved. Double-click the card's bottom edge to reset it.")
 
         def reset(e):
             self._vdrag = None
-            extra[0] = 0
-            apply_extra()
+            c.extra, c.min_extra = 0, None
             self.data["card_extra"].pop(key, None)
+            self.schedule_fit([key])
             self.persist()
             self.say("Card size reset.")
 
@@ -1094,91 +1253,134 @@ class App:
             w.bind("<ButtonRelease-1>", release)
             w.bind("<Double-Button-1>", reset)
 
-        collapsed = bool(self.data["collapsed"].get(key))
-        btn = ttk.Button(head, text="▸" if collapsed else "▾", width=2, style="Ghost.TButton", cursor="hand2")
-        btn.pack(side="right")
+        # -- move: drag the ⠿ handle or the title --
+        def m_press(e):
+            self._cdrag = key
+            outer.configure(highlightbackground=p["accent"], highlightcolor=p["accent"], highlightthickness=2)
+            mover.configure(fg=p["accent_text"])
 
+        def m_motion(e):
+            if self._cdrag == key:
+                self._drag_card_to(key, e.y_root)
+
+        def m_release(e):
+            if self._cdrag == key:
+                self._cdrag = None
+                outer.configure(highlightbackground=p["border"], highlightcolor=p["border"], highlightthickness=1)
+                mover.configure(fg=p["muted"])
+                if self.data.get("card_order") != self.card_order:
+                    self.data["card_order"] = list(self.card_order)
+                    self.persist()
+                    self.say("Card order saved.")
+
+        for w in (mover, title_lbl):
+            w.bind("<ButtonPress-1>", m_press)
+            w.bind("<B1-Motion>", m_motion)
+            w.bind("<ButtonRelease-1>", m_release)
+        mover.bind("<Enter>", lambda e: mover.configure(fg=p["accent_text"]))
+        mover.bind("<Leave>", lambda e: None if self._cdrag == key else mover.configure(fg=p["muted"]))
+
+        # -- collapse --
         def toggle():
-            now_collapsed = not self.data["collapsed"].get(key, False)
-            self.data["collapsed"][key] = now_collapsed
-            if now_collapsed:
+            c.collapsed = not c.collapsed
+            self.data["collapsed"][key] = c.collapsed
+            if c.collapsed:
                 content.pack_forget()
-                spacer.pack_forget()
                 grip.pack_forget()
                 btn.config(text="▸")
             else:
-                content.pack(fill="x", pady=(10, 0))
-                spacer.pack(fill="x")
+                content.pack(fill="both", expand=True, pady=(10, 0))
                 grip.pack(side="bottom", fill="x", before=body)
                 btn.config(text="▾")
+                self.schedule_fit([key])
             self.persist()
 
         btn.configure(command=toggle)
-        if collapsed:
+        if c.collapsed:
             grip.pack_forget()
         else:
-            content.pack(fill="x", pady=(10, 0))
-            spacer.pack(fill="x")
-        return content
+            content.pack(fill="both", expand=True, pady=(10, 0))
+        self.cards[key] = c
+        return c
 
-    def field(self, parent, label, row, var, picker=None, width=None):
-        ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-        e = ttk.Entry(parent, textvariable=var, font=self.f())
+    def field(self, parent, label, row, var, picker=None, width=None, card=None):
+        ttk.Label(parent, text=label, style=card.st["label"] if card else "Card.TLabel").grid(
+            row=row, column=0, sticky="w", pady=4, padx=(0, 10))
+        e = ttk.Entry(parent, textvariable=var, font=card.fonts["n"] if card else self.f())
         if width:
             e.configure(width=width)
-        e.grid(row=row, column=1, sticky="ew", pady=4, columnspan=1 if picker else 2)
+        elif card:
+            e.configure(width=4)  # the box stretches to fill the card
+        e.grid(row=row, column=1, sticky="nsew" if card else "ew", pady=4, columnspan=1 if picker else 2)
         if picker:
             icon, action = picker
-            b = ttk.Button(parent, text=icon, width=3, style="Icon.TButton", cursor="hand2")
+            b = ttk.Button(parent, text=icon, width=3, style=card.st["icon"] if card else "Icon.TButton",
+                           cursor="hand2")
             b.configure(command=lambda: action(b))
-            b.grid(row=row, column=2, sticky="e", padx=(6, 0), pady=4)
+            b.grid(row=row, column=2, sticky="nse" if card else "e", padx=(6, 0), pady=4)
         return e
 
     def build_cards(self, parent):
-        # Pay settings
+        self.cards = {}
+        self.card_order = list(self.data.get("card_order") or CARD_KEYS)
+        self.build_pay_card(parent)
+        self.build_timer_card(parent)
+        self.build_manual_card(parent)
+        self.pack_cards()
+
+    def build_pay_card(self, parent):
         c = self.card(parent, "pay", "Pay settings", "⚙")
+        k = c.content
         self.v_name = tk.StringVar(value=self.data.get("name", ""))
         self.v_rate = tk.StringVar(value=str(self.data.get("rate", "")))
         self.v_mult = tk.StringVar(value=str(self.data.get("mult", "1")))
-        self.field(c, "Name", 0, self.v_name)
-        self.field(c, "Rate (EGP/hour)", 1, self.v_rate)
-        self.field(c, "Multiplier", 2, self.v_mult)
-        ttk.Label(c, text="Your name is added to every new log entry.", style="Muted.TLabel").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.field(k, "Name", 0, self.v_name, card=c)
+        self.field(k, "Rate (EGP/hour)", 1, self.v_rate, card=c)
+        self.field(k, "Multiplier", 2, self.v_mult, card=c)
+        hint = ttk.Label(k, text="Your name is added to every new log entry.", style=c.st["muted"])
+        hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        c.wrap.append(hint)
+        c.stretch_rows = [0, 1, 2]
         for v in (self.v_name, self.v_rate, self.v_mult):
             v.trace_add("write", self.on_settings)
 
-        # Live timer
+    def build_timer_card(self, parent):
         c = self.card(parent, "timer", "Live timer", "⏱")
-        self.clock = ttk.Label(c, text="00:00:00", style="Clock.TLabel", anchor="center")
-        self.clock.grid(row=0, column=0, columnspan=3, sticky="ew")
-        self.timer_info = ttk.Label(c, text="", style="Muted.TLabel", anchor="center")
+        k = c.content
+        self.clock = ttk.Label(k, text="00:00:00", style=c.st["clock"], anchor="center")
+        self.clock.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        self.timer_info = ttk.Label(k, text="", style=c.st["muted"], anchor="center", justify="center")
         self.timer_info.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        self.t_queue = ttk.Combobox(c, values=QUEUES, state="readonly", font=self.f())
+        c.wrap.append(self.timer_info)
+        self.t_queue = ttk.Combobox(k, values=QUEUES, state="readonly", font=c.fonts["n"], width=4)
         self.t_queue.set(QUEUES[0])
-        self.t_queue.grid(row=2, column=0, columnspan=2, sticky="ew", padx=(0, 8))
-        self.t_btn = ttk.Button(c, text="▶  Start", style="Primary.TButton", cursor="hand2",
+        self.t_queue.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=(0, 8))
+        self.t_btn = ttk.Button(k, text="▶  Start", style=c.st["primary"], cursor="hand2",
                                 command=self.toggle_timer)
-        self.t_btn.grid(row=2, column=2, sticky="e")
+        self.t_btn.grid(row=2, column=2, sticky="nse")
+        c.stretch_rows = [0]
 
-        # Add overtime manually
+    def build_manual_card(self, parent):
         c = self.card(parent, "manual", "Add overtime manually", "✚")
+        k = c.content
         self.m_date = tk.StringVar(value=date.today().isoformat())
         self.m_start, self.m_end, self.m_note = tk.StringVar(), tk.StringVar(), tk.StringVar()
-        self.field(c, "Date", 0, self.m_date, ("📅", lambda b: DatePicker(self, b, self.m_date)))
-        ttk.Label(c, text="Queue", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 10))
-        self.m_queue = ttk.Combobox(c, values=QUEUES, state="readonly", font=self.f())
+        self.field(k, "Date", 0, self.m_date, ("📅", lambda b: DatePicker(self, b, self.m_date)), card=c)
+        ttk.Label(k, text="Queue", style=c.st["label"]).grid(row=1, column=0, sticky="w", pady=4, padx=(0, 10))
+        self.m_queue = ttk.Combobox(k, values=QUEUES, state="readonly", font=c.fonts["n"], width=4)
         self.m_queue.set(QUEUES[0])
-        self.m_queue.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
-        self.field(c, "Start time", 2, self.m_start,
-                   ("🕒", lambda b: TimePicker(self, b, self.m_start, "Start time")))
-        self.field(c, "End time", 3, self.m_end,
-                   ("🕒", lambda b: TimePicker(self, b, self.m_end, "End time")))
-        self.field(c, "Note", 4, self.m_note)
-        self.m_preview = ttk.Label(c, text="", style="Muted.TLabel")
+        self.m_queue.grid(row=1, column=1, columnspan=2, sticky="nsew", pady=4)
+        self.field(k, "Start time", 2, self.m_start,
+                   ("🕒", lambda b: TimePicker(self, b, self.m_start, "Start time")), card=c)
+        self.field(k, "End time", 3, self.m_end,
+                   ("🕒", lambda b: TimePicker(self, b, self.m_end, "End time")), card=c)
+        self.field(k, "Note", 4, self.m_note, card=c)
+        self.m_preview = ttk.Label(k, text="", style=c.st["muted"])
         self.m_preview.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Button(c, text="✚  Add entry", style="Primary.TButton", cursor="hand2",
+        c.wrap.append(self.m_preview)
+        ttk.Button(k, text="✚  Add entry", style=c.st["primary"], cursor="hand2",
                    command=self.add_manual).grid(row=6, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        c.stretch_rows = [0, 1, 2, 3, 4]
         for v in (self.m_date, self.m_start, self.m_end):
             v.trace_add("write", self.update_preview)
 
@@ -1612,8 +1814,10 @@ class App:
 
     def sync_timer_ui(self):
         running = bool(self.data.get("timer"))
+        st = self.cards["timer"].st if "timer" in self.cards else {"danger": "Danger.TButton",
+                                                                   "primary": "Primary.TButton"}
         self.t_btn.config(text="■  Stop & save" if running else "▶  Start",
-                          style="Danger.TButton" if running else "Primary.TButton")
+                          style=st["danger"] if running else st["primary"])
         self.t_queue.config(state="disabled" if running else "readonly")
         if running:
             self.t_queue.set(self.data["timer"]["queue"])
