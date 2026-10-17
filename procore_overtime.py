@@ -140,8 +140,8 @@ class App:
         self.root = root
         self.data = load_data()
         root.title("Procore Overtime")
-        root.geometry("1060x680")
-        root.minsize(900, 600)
+        root.geometry("1120x720")
+        root.minsize(920, 600)
         root.configure(bg=TEAL)
         self.style()
         self.status = tk.StringVar(value=f"Saved automatically to {DATA_FILE}")
@@ -159,82 +159,103 @@ class App:
         s.configure("Card.TLabel", background=CREAM, foreground=INK)
         s.configure("Big.TLabel", background=CREAM, foreground=INK, font=("Consolas", 26, "bold"))
         s.configure("Pay.TLabel", background=CREAM, foreground=TEAL, font=("Segoe UI", 14, "bold"))
-        s.configure("Card.TLabelframe", background=CREAM, bordercolor=GOLD)
+        s.configure("Card.TLabelframe", background=CREAM, bordercolor=GOLD, relief="solid", borderwidth=1)
         s.configure("Card.TLabelframe.Label", background=CREAM, foreground=INK, font=("Segoe UI", 11, "bold"))
         s.configure("Gold.TButton", background=GOLD, foreground="#4a3406", font=("Segoe UI", 10, "bold"))
         s.map("Gold.TButton", background=[("active", "#e6b84f")])
         s.configure("Stop.TButton", background="#b5473a", foreground="white", font=("Segoe UI", 10, "bold"))
+        s.map("Stop.TButton", background=[("active", "#d9534f")])
         s.configure("Treeview", rowheight=28, fieldbackground=FIELD, background=FIELD, foreground=INK)
         s.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
         s.map("Treeview", background=[("selected", TEAL)], foreground=[("selected", "white")])
         s.configure("TEntry", fieldbackground=FIELD)
         s.configure("TCombobox", fieldbackground=FIELD)
+        s.configure("Panedwindow", background=TEAL)
 
     def card(self, parent, title):
-        lf = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe", padding=10)
-        lf.pack(fill="x", pady=(0, 10))
+        lf = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe", padding=12)
+        lf.pack(fill="x", expand=True, pady=(0, 10))
+        lf.columnconfigure(1, weight=1)
         return lf
 
-    def field(self, parent, label, row, var=None, width=18):
-        ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=2)
-        e = ttk.Entry(parent, textvariable=var, width=width)
-        e.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
+    def field(self, parent, label, row, var=None):
+        ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+        e = ttk.Entry(parent, textvariable=var)
+        e.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=3)
         return e
 
     # -- layout
     def build(self):
-        main = tk.Frame(self.root, bg=TEAL, padx=12, pady=12)
-        main.pack(fill="both", expand=True)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
-        left = tk.Frame(main, bg=TEAL)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
-        right = tk.Frame(main, bg=TEAL)
-        right.grid(row=0, column=1, sticky="nsew")
+        # Interactive Resizable Splitter
+        paned = ttk.PanedWindow(self.root, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # settings
+        # Left Panel (Cards) with Scroll Support
+        left_container = tk.Frame(paned, bg=TEAL)
+        paned.add(left_container, weight=1)
+
+        canvas = tk.Canvas(left_container, bg=TEAL, highlightthickness=0)
+        v_scroll = ttk.Scrollbar(left_container, orient="vertical", command=canvas.yview)
+        left = tk.Frame(canvas, bg=TEAL)
+
+        left.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas_window = canvas.create_window((0, 0), window=left, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        canvas.configure(yscrollcommand=v_scroll.set)
+
+        # Mousewheel scroll binding for left panel
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", lambda e: _on_mousewheel(e) if str(e.widget).startswith(str(left_container)) else None)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        v_scroll.pack(side="right", fill="y")
+
+        # Right Panel (Log Table & Controls)
+        right = tk.Frame(paned, bg=TEAL)
+        paned.add(right, weight=3)
+
+        # 1. Pay Settings Card
         c = self.card(left, "Pay settings")
-        c.columnconfigure(1, weight=1)
         self.v_name = tk.StringVar(value=self.data["name"])
         self.v_email = tk.StringVar(value=self.data["email"])
         self.v_rate = tk.StringVar(value=str(self.data["rate"]))
         self.v_mult = tk.StringVar(value=str(self.data["mult"]))
         self.field(c, "Name", 0, self.v_name)
         self.field(c, "Email", 1, self.v_email)
-        self.field(c, "Rate (EGP/hour)", 2, self.v_rate)
+        self.field(c, "Rate (EGP/h)", 2, self.v_rate)
         self.field(c, "Multiplier", 3, self.v_mult)
         for v in (self.v_name, self.v_email, self.v_rate, self.v_mult):
             v.trace_add("write", lambda *a: self.on_settings())
 
-        # timer
+        # 2. Live Timer Card
         c = self.card(left, "Live timer")
-        self.clock = ttk.Label(c, text="00:00:00", style="Big.TLabel")
-        self.clock.pack()
+        self.clock = ttk.Label(c, text="00:00:00", style="Big.TLabel", anchor="center")
+        self.clock.pack(fill="x", pady=(2, 6))
         row = ttk.Frame(c, style="Card.TFrame")
-        row.pack(fill="x", pady=(6, 0))
-        self.t_queue = ttk.Combobox(row, values=QUEUES, state="readonly", width=12)
+        row.pack(fill="x", pady=(2, 0))
+        self.t_queue = ttk.Combobox(row, values=QUEUES, state="readonly", width=14)
         self.t_queue.set(QUEUES[0])
-        self.t_queue.pack(side="left")
+        self.t_queue.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.t_btn = ttk.Button(row, text="▶ Start", command=self.toggle_timer, style="Gold.TButton")
         self.t_btn.pack(side="right")
 
-        # manual entry
+        # 3. Add Overtime Manually Card
         c = self.card(left, "Add overtime manually")
-        c.columnconfigure(1, weight=1)
         self.m_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.m_start, self.m_end, self.m_note = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.field(c, "Date (YYYY-MM-DD)", 0, self.m_date)
-        ttk.Label(c, text="Queue", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
-        self.m_queue = ttk.Combobox(c, values=QUEUES, state="readonly", width=16)
+        ttk.Label(c, text="Queue", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=3)
+        self.m_queue = ttk.Combobox(c, values=QUEUES, state="readonly")
         self.m_queue.set(QUEUES[0])
-        self.m_queue.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.m_queue.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=3)
         self.field(c, "Start (e.g. 22:46)", 2, self.m_start)
         self.field(c, "End (e.g. 00:46)", 3, self.m_end)
         self.field(c, "Note", 4, self.m_note)
         ttk.Button(c, text="Add entry", command=self.add_manual, style="Gold.TButton").grid(
             row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
 
-        # summary
+        # 4. Summary Card
         c = self.card(left, "Summary")
         self.s_time = ttk.Label(c, text="", style="Card.TLabel")
         self.s_time.pack(anchor="w")
@@ -243,13 +264,13 @@ class App:
         self.s_q = ttk.Label(c, text="", style="Card.TLabel", justify="left")
         self.s_q.pack(anchor="w")
 
-        # log
+        # Right Side - Overtime Log
         box = ttk.LabelFrame(right, text="Overtime log", style="Card.TLabelframe", padding=10)
         box.pack(fill="both", expand=True)
         cols = ("date", "queue", "time", "dur", "pay", "note")
         self.tree = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse")
-        for k, t, w in (("date", "Date", 90), ("queue", "Queue", 90), ("time", "Time", 170),
-                        ("dur", "Duration", 80), ("pay", "Pay", 110), ("note", "Note", 200)):
+        for k, t, w in (("date", "Date", 90), ("queue", "Queue", 100), ("time", "Time", 170),
+                        ("dur", "Duration", 85), ("pay", "Pay", 115), ("note", "Note", 200)):
             self.tree.heading(k, text=t)
             self.tree.column(k, width=w, stretch=(k == "note"))
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
@@ -259,6 +280,7 @@ class App:
         self.tree.bind("<Double-1>", lambda e: self.edit_selected())
         self.tree.bind("<Delete>", lambda e: self.delete_selected())
 
+        # Action Buttons Toolbar
         bar = tk.Frame(right, bg=TEAL)
         bar.pack(fill="x", pady=(10, 0))
         for text, cmd, st in (("📋 Copy log", self.copy_log, "Gold.TButton"),
@@ -269,6 +291,7 @@ class App:
                               ("✉️ Email my log", self.email_log, "TButton"),
                               ("📁 Data folder", self.open_folder, "TButton")):
             ttk.Button(bar, text=text, command=cmd, style=st).pack(side="left", padx=(0, 6))
+
         tk.Label(right, textvariable=self.status, bg=TEAL, fg="#bfe3dd", anchor="w").pack(fill="x", pady=(8, 0))
 
     # -- data / state
@@ -401,13 +424,13 @@ class App:
         vd, vs, ve, vn = (tk.StringVar(value=e["date"]), tk.StringVar(value=e["start"]),
                           tk.StringVar(value=e["end"]), tk.StringVar(value=e.get("note", "")))
         self.field(f, "Date (YYYY-MM-DD)", 0, vd)
-        ttk.Label(f, text="Queue", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Queue", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=3)
         q = ttk.Combobox(f, values=QUEUES, state="readonly", width=16)
         q.set(e["queue"])
-        q.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        q.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=3)
         self.field(f, "Start", 2, vs)
         self.field(f, "End", 3, ve)
-        self.field(f, "Note", 4, vn, width=30)
+        self.field(f, "Note", 4, vn)
 
         def save():
             v = self.validate(vd.get(), vs.get(), ve.get())
@@ -497,7 +520,7 @@ class App:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(self.log_text())
-        self.root.update()  # keeps the text on the clipboard after the app closes
+        self.root.update()
         self.say(f"Log copied ({len(self.data['entries'])} entries).")
 
     def export_csv(self):
